@@ -56,6 +56,7 @@ function SurveyStep({ loading, onSubmit }) {
   const [smokeShopProducts, setSmokeShopProducts] = useState([]);
   const [vapePriority, setVapePriority] = useState("");
   const [zipCode, setZipCode] = useState("");
+  const [zipCodeError, setZipCodeError] = useState("");
   const [instagramHandle, setInstagramHandle] = useState("");
 
   const toggleSmokeShopProduct = (value) => {
@@ -71,6 +72,15 @@ function SurveyStep({ loading, onSubmit }) {
   const handleSubmit = (event) => {
     event.preventDefault();
 
+    const normalizedZipCode = zipCode.trim();
+
+    if (!/^\d{5}$/.test(normalizedZipCode)) {
+      setZipCodeError("The zip code is invalid.");
+      return;
+    }
+
+    setZipCodeError("");
+
     onSubmit({
       favoriteVapeBrand:
         favoriteVapeBrand === "Other" ? otherVapeBrand.trim() : favoriteVapeBrand,
@@ -84,7 +94,7 @@ function SurveyStep({ loading, onSubmit }) {
           favoriteCigaretteBrand,
       smokeShopProducts,
       vapePriority,
-      zipCode,
+      zipCode: normalizedZipCode,
       instagramHandle,
     });
   };
@@ -117,7 +127,7 @@ function SurveyStep({ loading, onSubmit }) {
         {favoriteVapeBrand === "Other" && (
           <label className="flex flex-col gap-2">
             <span className="text-sm font-semibold text-[#5c5248]">
-              Other brand
+              Please tell us which brand :)
             </span>
             <input
               type="text"
@@ -197,7 +207,7 @@ function SurveyStep({ loading, onSubmit }) {
         {favoriteCigaretteBrand === "Other" && (
           <label className="flex flex-col gap-2">
             <span className="text-sm font-semibold text-[#5c5248]">
-              Other brand
+              Please tell us which brand :)
             </span>
             <input
               type="text"
@@ -265,11 +275,27 @@ function SurveyStep({ loading, onSubmit }) {
         <input
           type="text"
           inputMode="numeric"
+          pattern="[0-9]{5}"
+          maxLength={5}
           value={zipCode}
-          onChange={(event) => setZipCode(event.target.value)}
+          onChange={(event) => {
+            setZipCode(event.target.value.replace(/\D/g, "").slice(0, 5));
+            setZipCodeError("");
+          }}
+          aria-invalid={zipCodeError ? "true" : "false"}
+          aria-describedby={zipCodeError ? "zip-code-error" : undefined}
           required
-          className="w-full rounded-xl border border-[#d8cbbd] bg-[#fffaf4] px-4 py-3 text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#4d9b5f]"
+          className={
+            zipCodeError ?
+              "w-full rounded-xl border border-red-700 bg-[#fffaf4] px-4 py-3 text-[#111111] focus:outline-none focus:ring-2 focus:ring-red-300" :
+              "w-full rounded-xl border border-[#d8cbbd] bg-[#fffaf4] px-4 py-3 text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#4d9b5f]"
+          }
         />
+        {zipCodeError && (
+          <span id="zip-code-error" className="text-sm font-semibold text-red-700">
+            {zipCodeError}
+          </span>
+        )}
       </label>
 
       <div className="text-left">

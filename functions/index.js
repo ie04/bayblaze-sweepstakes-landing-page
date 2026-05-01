@@ -14,6 +14,10 @@ const RESEND_API_KEY = defineSecret("RESEND_API_KEY");
 const TEST_EMAILS = new Set([
   "iyad@eltifi.com",
 ]);
+const DASHBOARD_ADMIN_EMAILS = new Set([
+  "iyad@eltifi.com",
+]);
+const PENDING_VERIFICATIONS_COLLECTION = "pending_email_verifications";
 const QR_DARK_COLOR = "#2f6b3f";
 const QR_LIGHT_COLOR = "#f3eadf";
 const QR_IMAGE_SIZE = 1200;
@@ -33,6 +37,64 @@ function generateCode() {
 
 function hashCode(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+function hashEmail(email) {
+  return crypto.createHash("sha256").update(normalizeEmail(email)).digest("hex");
+}
+
+function isDashboardAdmin(decodedToken) {
+  const email =
+    typeof decodedToken.email === "string" ?
+      decodedToken.email.trim().toLowerCase() :
+      "";
+
+  return decodedToken.admin === true || DASHBOARD_ADMIN_EMAILS.has(email);
+}
+
+function serializeFirestoreValue(value) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (
+    typeof value.toMillis === "function" &&
+    typeof value.seconds === "number"
+  ) {
+    return {
+      seconds: value.seconds,
+      nanoseconds: value.nanoseconds,
+    };
+  }
+
+  if (
+    typeof value.path === "string" &&
+    typeof value.id === "string" &&
+    typeof value.parent === "object"
+  ) {
+    return {path: value.path};
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => serializeFirestoreValue(item));
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value).reduce((serialized, [key, item]) => {
+      serialized[key] = serializeFirestoreValue(item);
+      return serialized;
+    }, {});
+  }
+
+  return value;
+}
+
+function serializeDocument(doc) {
+  return {
+    id: doc.id,
+    __path: doc.ref.path,
+    ...serializeFirestoreValue(doc.data()),
+  };
 }
 
 function createRoundedRectSvg(width, height, radius, fill) {
@@ -304,7 +366,7 @@ exports.generateReferralLink = onRequest(
       const resend = new Resend(RESEND_API_KEY.value());
 
       await resend.emails.send({
-        from: "BayBlaze <noreply@bayblaze.net>",
+        from: "BAYBLAZE <noreply@bayblaze.net>",
         to: normalizedEmail,
         subject: "Your BayBlaze referral link",
         html: `
@@ -414,6 +476,47 @@ exports.generateInstagramQr = onRequest(
   }
 );
 
+exports.getDashboardData = onRequest({cors: true}, async (req, res) => {
+  try {
+    if (req.method !== "GET") {
+      res.status(405).json({error: "Method not allowed"});
+      return;
+    }
+
+    const authorization = req.get("authorization") || "";
+    const tokenMatch = authorization.match(/^Bearer\s+(.+)$/i);
+
+    if (!tokenMatch) {
+      res.status(401).json({error: "Missing credentials"});
+      return;
+    }
+
+    const decodedToken = await admin.auth().verifyIdToken(tokenMatch[1]);
+
+    if (!isDashboardAdmin(decodedToken)) {
+      res.status(403).json({error: "Not authorized for dashboard access"});
+      return;
+    }
+
+    const db = admin.firestore();
+    const [surveyResponsesSnap, sweepstakesEntriesSnap] = await Promise.all([
+      db.collection("survey_responses").get(),
+      db
+        .collection("sweepstakes_entries")
+        .where("emailVerified", "==", true)
+        .get(),
+    ]);
+
+    res.status(200).json({
+      surveyResponses: surveyResponsesSnap.docs.map(serializeDocument),
+      sweepstakesEntries: sweepstakesEntriesSnap.docs.map(serializeDocument),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({error: "Could not load dashboard data"});
+  }
+});
+
 exports.startEmailVerification = onRequest(
   {cors: true, secrets: [RESEND_API_KEY]},
   async (req, res) => {
@@ -423,7 +526,7 @@ exports.startEmailVerification = onRequest(
         return;
       }
 
-      const {email} = req.body || {};
+      const {email, referralCode} = req.body || {};
 
       if (!email || typeof email !== "string") {
         res.status(400).json({error: "Missing email"});
@@ -433,7 +536,20 @@ exports.startEmailVerification = onRequest(
       const normalizedEmail = normalizeEmail(email);
       const db = admin.firestore();
       const entryRef = db.doc(`sweepstakes_entries/${normalizedEmail}`);
-      const entrySnap = await entryRef.get();
+      const verificationRef = db.doc(
+        `${PENDING_VERIFICATIONS_COLLECTION}/${hashEmail(normalizedEmail)}`
+      );
+      const [entrySnap, verificationSnap] = await Promise.all([
+        entryRef.get(),
+        verificationRef.get(),
+      ]);
+      const normalizedReferralCode =
+        typeof referralCode === "string" ? referralCode.trim() : "";
+      let referredBy =
+        (entrySnap.exists ? entrySnap.data().referredBy : null) ||
+        (verificationSnap.exists ? verificationSnap.data().referredBy : null) ||
+        null;
+      let shouldUpdateReferredBy = false;
 
       if (
         entrySnap.exists &&
@@ -444,7 +560,28 @@ exports.startEmailVerification = onRequest(
         return;
       }
 
+      if (!referredBy && normalizedReferralCode) {
+        const referrerSnap = await db
+          .collection("sweepstakes_entries")
+          .where("referralCode", "==", normalizedReferralCode)
+          .limit(1)
+          .get();
+
+        if (!referrerSnap.empty) {
+          const referrerEmail = referrerSnap.docs[0].id;
+
+          if (referrerEmail !== normalizedEmail) {
+            referredBy = referrerSnap.docs[0].ref;
+            shouldUpdateReferredBy = true;
+          }
+        }
+      }
+
       if (entrySnap.exists && entrySnap.data().emailVerified === true) {
+        if (shouldUpdateReferredBy) {
+          await entryRef.update({referredBy});
+        }
+
         res.status(200).json({
           status: "already_verified",
           email: normalizedEmail,
@@ -457,30 +594,32 @@ exports.startEmailVerification = onRequest(
       const expiresAt = admin.firestore.Timestamp.fromDate(
         new Date(Date.now() + 10 * 60 * 1000)
       );
+      const verificationData = {
+        codeHash,
+        expiresAt,
+        attempts: 0,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
 
-      await entryRef.set(
-        {
-          email: normalizedEmail,
-          used: false,
-          emailVerified: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          referredBy: null,
-          referrals: [],
-          referralCount: 0,
-          verification: {
-            codeHash,
-            expiresAt,
-            attempts: 0,
-            lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
-          },
-        },
-        {merge: true}
-      );
+      if (referredBy) {
+        verificationData.referredBy = referredBy;
+      }
+
+      await verificationRef.set(verificationData, {merge: true});
+
+      if (
+        entrySnap.exists &&
+        entrySnap.data().emailVerified !== true &&
+        entrySnap.data().used !== true
+      ) {
+        await entryRef.delete();
+      }
 
       const resend = new Resend(RESEND_API_KEY.value());
 
       await resend.emails.send({
-        from: "BayBlaze <noreply@bayblaze.net>",
+        from: "BAYBLAZE <noreply@bayblaze.net>",
         to: normalizedEmail,
         subject: "Your BayBlaze verification code",
         html: `
@@ -522,25 +661,31 @@ exports.verifyEmailCode = onRequest(
 
       const db = admin.firestore();
       const entryRef = db.doc(`sweepstakes_entries/${normalizedEmail}`);
+      const verificationRef = db.doc(
+        `${PENDING_VERIFICATIONS_COLLECTION}/${hashEmail(normalizedEmail)}`
+      );
 
       await db.runTransaction(async (tx) => {
+        const verificationSnap = await tx.get(verificationRef);
         const entrySnap = await tx.get(entryRef);
+        const entry = entrySnap.exists ? entrySnap.data() : null;
 
-        if (!entrySnap.exists) {
-          throw new Error("Entry not found");
-        }
-
-        const entry = entrySnap.data();
-
-        if (entry.used === true && !isTestEmail(normalizedEmail)) {
+        if (entry?.used === true && !isTestEmail(normalizedEmail)) {
           throw new Error("This email has already been used.");
         }
 
-        if (entry.emailVerified === true) {
+        if (entry?.emailVerified === true) {
+          if (verificationSnap.exists) {
+            tx.delete(verificationRef);
+          }
+
           return;
         }
 
-        const verification = entry.verification;
+        const verification = verificationSnap.exists ?
+          verificationSnap.data() :
+          entry?.verification || null;
+        const isPendingVerification = verificationSnap.exists;
 
         if (!verification) {
           throw new Error("No verification code found.");
@@ -557,18 +702,67 @@ exports.verifyEmailCode = onRequest(
         }
 
         if (verification.codeHash !== submittedCodeHash) {
-          tx.update(entryRef, {
-            "verification.attempts": admin.firestore.FieldValue.increment(1),
-          });
+          if (isPendingVerification) {
+            tx.update(verificationRef, {
+              attempts: admin.firestore.FieldValue.increment(1),
+            });
+          } else {
+            tx.update(entryRef, {
+              "verification.attempts": admin.firestore.FieldValue.increment(1),
+            });
+          }
 
           throw new Error("Incorrect verification code.");
         }
 
-        tx.update(entryRef, {
-          emailVerified: true,
-          verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-          verification: admin.firestore.FieldValue.delete(),
-        });
+        const referredBy = entry?.referredBy || verification.referredBy || null;
+
+        if (entrySnap.exists) {
+          const entryUpdate = {
+            email: normalizedEmail,
+            emailVerified: true,
+            verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+            verification: admin.firestore.FieldValue.delete(),
+          };
+
+          if (entry.used !== true) {
+            entryUpdate.used = false;
+          }
+
+          if (!Array.isArray(entry.referrals)) {
+            entryUpdate.referrals = [];
+          }
+
+          if (typeof entry.referralCount !== "number") {
+            entryUpdate.referralCount = 0;
+          }
+
+          if (referredBy) {
+            entryUpdate.referredBy = referredBy;
+          }
+
+          tx.update(entryRef, entryUpdate);
+        } else {
+          const entryData = {
+            email: normalizedEmail,
+            used: false,
+            emailVerified: true,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+            referrals: [],
+            referralCount: 0,
+          };
+
+          if (referredBy) {
+            entryData.referredBy = referredBy;
+          }
+
+          tx.set(entryRef, entryData);
+        }
+
+        if (verificationSnap.exists) {
+          tx.delete(verificationRef);
+        }
       });
 
       res.status(200).json({
@@ -596,6 +790,7 @@ exports.updateSweepstakesFromForm = onRequest({cors: true}, async (req, res) => 
       instagramHandle,
       favoriteVapeBrand,
       favoriteVapeFlavor,
+      favoriteCigaretteBrand,
       smokeShopProducts,
       vapePriority,
       zipCode,
@@ -611,6 +806,10 @@ exports.updateSweepstakesFromForm = onRequest({cors: true}, async (req, res) => 
       typeof favoriteVapeBrand === "string" ? favoriteVapeBrand.trim() : "";
     const normalizedFavoriteVapeFlavor =
       typeof favoriteVapeFlavor === "string" ? favoriteVapeFlavor.trim() : "";
+    const normalizedFavoriteCigaretteBrand =
+      typeof favoriteCigaretteBrand === "string" ?
+        favoriteCigaretteBrand.trim() :
+        "";
     const normalizedVapePriority =
       typeof vapePriority === "string" ? vapePriority.trim() : "";
     const normalizedZipCode =
@@ -632,6 +831,11 @@ exports.updateSweepstakesFromForm = onRequest({cors: true}, async (req, res) => 
       return;
     }
 
+    if (!normalizedFavoriteCigaretteBrand) {
+      res.status(400).send("Missing favorite cigarette brand");
+      return;
+    }
+
     if (!normalizedSmokeShopProducts.length) {
       res.status(400).send("Missing smoke shop products");
       return;
@@ -644,6 +848,11 @@ exports.updateSweepstakesFromForm = onRequest({cors: true}, async (req, res) => 
 
     if (!normalizedZipCode) {
       res.status(400).send("Missing zip code");
+      return;
+    }
+
+    if (!/^\d{5}$/.test(normalizedZipCode)) {
+      res.status(400).send("Invalid zip code");
       return;
     }
 
@@ -669,36 +878,42 @@ exports.updateSweepstakesFromForm = onRequest({cors: true}, async (req, res) => 
 
     await db.runTransaction(async (tx) => {
       const freshEntrySnap = await tx.get(entryRef);
+
+      if (!freshEntrySnap.exists) {
+        throw new Error("Entry disappeared");
+      }
+
       const freshEntryData = freshEntrySnap.data();
 
-    if (!freshEntrySnap.exists) {
-        throw new Error("Entry disappeared");
-    }
-
-    if (freshEntryData.used === true && !isTestEmail(normalizedEmail)) {
+      if (freshEntryData.used === true && !isTestEmail(normalizedEmail)) {
         return;
-    }
-    
-    if (freshEntryData.emailVerified !== true) {
+      }
+
+      if (freshEntryData.emailVerified !== true) {
         throw new Error("Email is not verified.");
-    }
+      }
+
+      const referredBy = freshEntryData.referredBy || null;
+      const referrerRef =
+        referredBy && typeof referredBy.path === "string" ? referredBy : null;
+      const isSelfReferral =
+        referrerRef && referrerRef.path === entryRef.path;
+      const referrerSnap = referrerRef ? await tx.get(referrerRef) : null;
+      const responseRef = db.collection("survey_responses").doc();
+
       tx.update(entryRef, {
         used: true,
-        instagramHandle: normalizedInstagramHandle,
-        favoriteVapeBrand: normalizedFavoriteVapeBrand,
-        favoriteVapeFlavor: normalizedFavoriteVapeFlavor,
-        smokeShopProducts: normalizedSmokeShopProducts,
-        vapePriority: normalizedVapePriority,
-        zipCode: normalizedZipCode,
+        surveyResponse: responseRef,
         formSubmittedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      const responseRef = db.collection("survey_responses").doc();
       tx.set(responseRef, {
         email: normalizedEmail,
+        entry: entryRef,
         instagramHandle: normalizedInstagramHandle,
         favoriteVapeBrand: normalizedFavoriteVapeBrand,
         favoriteVapeFlavor: normalizedFavoriteVapeFlavor,
+        favoriteCigaretteBrand: normalizedFavoriteCigaretteBrand,
         smokeShopProducts: normalizedSmokeShopProducts,
         vapePriority: normalizedVapePriority,
         zipCode: normalizedZipCode,
@@ -706,27 +921,22 @@ exports.updateSweepstakesFromForm = onRequest({cors: true}, async (req, res) => 
         source: "react_form",
       });
 
-      const referredBy = freshEntryData.referredBy || null;
+      if (referrerRef && !isSelfReferral && referrerSnap.exists) {
+        const referrerData = referrerSnap.data();
+        const currentReferrals = Array.isArray(referrerData.referrals)
+          ? referrerData.referrals
+          : [];
 
-      if (referredBy && referredBy !== normalizedEmail) {
-        const referrerRef = db.doc(`sweepstakes_entries/${referredBy}`);
-        const referrerSnap = await tx.get(referrerRef);
+        const alreadyCredited = currentReferrals.some(
+          (referral) => referral?.path === entryRef.path
+        );
+        const underLimit = currentReferrals.length < 5;
 
-        if (referrerSnap.exists) {
-          const referrerData = referrerSnap.data();
-          const currentReferrals = Array.isArray(referrerData.referrals)
-            ? referrerData.referrals
-            : [];
-
-          const alreadyCredited = currentReferrals.includes(normalizedEmail);
-          const underLimit = currentReferrals.length < 5;
-
-          if (!alreadyCredited && underLimit) {
-            tx.update(referrerRef, {
-              referrals: admin.firestore.FieldValue.arrayUnion(normalizedEmail),
-              referralCount: admin.firestore.FieldValue.increment(1),
-            });
-          }
+        if (!alreadyCredited && underLimit) {
+          tx.update(referrerRef, {
+            referrals: admin.firestore.FieldValue.arrayUnion(entryRef),
+            referralCount: admin.firestore.FieldValue.increment(1),
+          });
         }
       }
     });

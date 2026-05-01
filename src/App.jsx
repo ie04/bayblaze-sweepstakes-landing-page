@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import "./App.css";
 import bayblazeBackground from "../functions/assets/bayblaze-background.png";
 import EmailStep from "./components/EmailStep";
@@ -7,13 +7,21 @@ import SurveyStep from "./components/SurveyStep";
 import ReferralStep from "./components/ReferralStep";
 import ThankYouStep from "./components/ThankYouStep";
 
+const Dashboard = lazy(() => import("./components/Dashboard"));
+
 function App() {
+  const isDashboardRoute =
+    window.location.pathname.replace(/\/+$/, "") === "/dashboard";
   const [screen, setScreen] = useState("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [referralGenerated, setReferralGenerated] = useState(false);
+  const [referralCode] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("ref")?.trim() || "";
+  });
 
   const START_EMAIL_VERIFICATION_URL =
     "https://us-central1-bayblaze-sweepstakes.cloudfunctions.net/startEmailVerification";
@@ -43,7 +51,10 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ email: normalizedEmail }),
+        body: JSON.stringify({
+          email: normalizedEmail,
+          referralCode,
+        }),
       });
 
       const data = await response.json();
@@ -178,6 +189,27 @@ function App() {
     screen === "thankyou" ?
       "Thank you for completing the survey!" :
       "Win a FREE $30 Visa Gift Card!";
+
+  if (isDashboardRoute) {
+    return (
+      <Suspense
+        fallback={
+          <main
+            className="app-shell min-h-screen flex items-center justify-center px-4 py-8"
+            style={{"--app-shell-background": `url(${bayblazeBackground})`}}
+          >
+            <div className="app-card w-full max-w-lg rounded-2xl p-8 text-center">
+              <p className="text-lg font-semibold text-[#2f6b3f]">
+                Loading dashboard...
+              </p>
+            </div>
+          </main>
+        }
+      >
+        <Dashboard />
+      </Suspense>
+    );
+  }
 
   return (
     <main

@@ -7,11 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy:all": "npm run build && npx -y firebase-tools@latest deploy && cd dist && npx wrangler pages deploy . --project-name bayblaze-sweepstakes-landing-page --branch main --commit-dirty=true",
+    "deploy:frontend": "npm run build && npx -y firebase-tools@latest deploy --only hosting && cd dist && npx wrangler pages deploy . --project-name bayblaze-sweepstakes-landing-page --branch main --commit-dirty=true"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
     "firebase": "^12.12.1",
+    "leaflet": "^1.9.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "tailwindcss": "^4.2.4"
