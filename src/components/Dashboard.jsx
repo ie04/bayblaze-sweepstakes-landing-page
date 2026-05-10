@@ -1174,7 +1174,7 @@ function DashboardScreen({ user }) {
         <header className="dashboard-header">
           <div>
             <p className="dashboard-eyebrow">BayBlaze</p>
-            <h1>Sweepstakes Dashboard</h1>
+            <h1>SWEEPSTAKES DASHBOARD</h1>
             <p className="dashboard-subtitle">
               {analytics.latestSubmission}
             </p>
